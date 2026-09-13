@@ -1,0 +1,64 @@
+# 3-node ringcache on one host.
+#
+#   docker compose up --build
+#   curl -sS http://127.0.0.1:8080/health
+#
+# network_mode: host so nodes share the host loopback and can replicate.
+# A user-defined bridge looks more "cluster-like", but peer packets do not
+# flow on some nested/CI Docker setups (this agent VM included: 100% loss
+# between veths). Host mode is the honest single-machine demo.
+#
+# Docker Desktop (Mac/Windows) ignores host networking — use `make cluster`.
+#
+# Failure demo:
+#   ./scripts/failure-demo.sh --compose
+
+x-common-env: &common-env
+  RINGCACHE_PEERS: "node-a=http://127.0.0.1:8080,node-b=http://127.0.0.1:8081,node-c=http://127.0.0.1:8082"
+  RINGCACHE_REPLICAS: "2"
+  RINGCACHE_CAPACITY: "10000"
+  RINGCACHE_VNODES: "150"
+  RINGCACHE_REPLICA_TIMEOUT_MS: "400"
+
+services:
+  node-a:
+    build: .
+    network_mode: host
+    environment:
+      <<: *common-env
+      RINGCACHE_ID: node-a
+      RINGCACHE_LISTEN: "127.0.0.1:8080"
+    healthcheck:
+      test: ["CMD", "/ringcache", "-healthcheck"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
+
+  node-b:
+    build: .
+    network_mode: host
+    environment:
+      <<: *common-env
+      RINGCACHE_ID: node-b
+      RINGCACHE_LISTEN: "127.0.0.1:8081"
+    healthcheck:
+      test: ["CMD", "/ringcache", "-healthcheck"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
+
+  node-c:
+    build: .
+    network_mode: host
+    environment:
+      <<: *common-env
+      RINGCACHE_ID: node-c
+      RINGCACHE_LISTEN: "127.0.0.1:8082"
+    healthcheck:
+      test: ["CMD", "/ringcache", "-healthcheck"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
