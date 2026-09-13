@@ -1,0 +1,67 @@
+# 3-node ringcache cluster. Host ports 8080/8081/8082 → container :8080.
+#
+#   docker compose up --build
+#   curl -s http://127.0.0.1:8080/health
+#
+# Failure demo (one node down, reads still served from the remaining replica):
+#   ./scripts/failure-demo.sh
+
+x-node: &node
+  build: .
+  restart: unless-stopped
+  environment:
+    RINGCACHE_LISTEN: ":8080"
+    RINGCACHE_PEERS: "node-a=http://node-a:8080,node-b=http://node-b:8080,node-c=http://node-c:8080"
+    RINGCACHE_REPLICAS: "2"
+    RINGCACHE_CAPACITY: "10000"
+    RINGCACHE_VNODES: "150"
+    RINGCACHE_REPLICA_TIMEOUT_MS: "200"
+  healthcheck:
+    test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+    interval: 2s
+    timeout: 2s
+    retries: 15
+    start_period: 3s
+
+services:
+  node-a:
+    <<: *node
+    hostname: node-a
+    environment:
+      RINGCACHE_ID: node-a
+      RINGCACHE_LISTEN: ":8080"
+      RINGCACHE_PEERS: "node-a=http://node-a:8080,node-b=http://node-b:8080,node-c=http://node-c:8080"
+      RINGCACHE_REPLICAS: "2"
+      RINGCACHE_CAPACITY: "10000"
+      RINGCACHE_VNODES: "150"
+      RINGCACHE_REPLICA_TIMEOUT_MS: "200"
+    ports:
+      - "8080:8080"
+
+  node-b:
+    <<: *node
+    hostname: node-b
+    environment:
+      RINGCACHE_ID: node-b
+      RINGCACHE_LISTEN: ":8080"
+      RINGCACHE_PEERS: "node-a=http://node-a:8080,node-b=http://node-b:8080,node-c=http://node-c:8080"
+      RINGCACHE_REPLICAS: "2"
+      RINGCACHE_CAPACITY: "10000"
+      RINGCACHE_VNODES: "150"
+      RINGCACHE_REPLICA_TIMEOUT_MS: "200"
+    ports:
+      - "8081:8080"
+
+  node-c:
+    <<: *node
+    hostname: node-c
+    environment:
+      RINGCACHE_ID: node-c
+      RINGCACHE_LISTEN: ":8080"
+      RINGCACHE_PEERS: "node-a=http://node-a:8080,node-b=http://node-b:8080,node-c=http://node-c:8080"
+      RINGCACHE_REPLICAS: "2"
+      RINGCACHE_CAPACITY: "10000"
+      RINGCACHE_VNODES: "150"
+      RINGCACHE_REPLICA_TIMEOUT_MS: "200"
+    ports:
+      - "8082:8080"
