@@ -180,6 +180,8 @@ The key picker reads **`owners[]` only**. Grepping the whole `/ring` body matche
 
 **Scenario B — partial ACK, then kill the only copy (expect MISS).** Kill node-b first. SET a key owned by `{node-a, node-b}` → `acked=1`, `failed=["node-b"]`, HTTP 200. Kill node-a. GET via node-c misses (both owners down). Success is `acked≥1`, not durability.
 
+**Real result on this tree (2026-09-13):** A picked `demo:failure-a:1` owners `[node-b, node-a]`, SET acked 2/2; after kill, :8080 and :8082 served `node-a`. B picked `demo:failure-b:1` owners `[node-b, node-a]`; SET while node-b down acked 1 (`failed=["node-b"]`); after killing node-a, GET :8082 returned **503** `all replicas unreachable`.
+
 ---
 
 ## Join / leave rebalance
@@ -204,7 +206,7 @@ Harness: `cmd/bench` — real HTTP PUT `/v1/set` and GET `/v1/get` against all t
 
 | | |
 | --- | --- |
-| Date (UTC) | 2026-09-13T09:29:48Z |
+| Date (UTC) | 2026-09-13T10:55:13Z |
 | Hardware | Linux 6.12.94+ x86_64, 4 vCPU, Intel Xeon, ~16 GiB RAM (Cursor Cloud Agent VM) |
 | Go | go1.22.2 linux/amd64 |
 | Cluster | 3 processes on loopback (`127.0.0.1:8080-8082`), `R=2`, `V=150`, cap 10000 |
@@ -212,12 +214,10 @@ Harness: `cmd/bench` — real HTTP PUT `/v1/set` and GET `/v1/get` against all t
 
 | Phase | ok | errors | wall | ops/s | p50 | p95 | p99 | max | mean |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| SET | 4000 | 0 | 312ms | **12820** | 2.28ms | 4.76ms | 6.56ms | 10.18ms | 2.48ms |
-| GET | 4000 | 0 | 129ms | **31027** | 0.82ms | 2.68ms | 3.91ms | 5.84ms | 1.02ms |
+| SET | 4000 | 0 | 426ms | **9395** | 3.08ms | 6.72ms | 8.90ms | 18.17ms | 3.40ms |
+| GET | 4000 | 0 | 378ms | **10583** | 2.33ms | 7.94ms | 11.31ms | 19.45ms | 3.01ms |
 
-These are **this VM, this commit, loopback**. Docker NAT, a laptop, or a noisy neighbor will differ. Do not cite them as product SLOs. Re-run `./scripts/bench.sh` and replace the table if you need numbers for a different machine.
-
-`docker compose up --build` was also run on this VM (host network). SET acked 2/2; after `compose stop node-b` on a key owned by node-b, GET on :8080 and :8082 still hit `node-a`.
+These are **this VM, this commit, loopback**. A quieter slot on the same VM earlier today printed ~12.8k SET / ~31k GET ops/s — same harness, same flags. Shared-CPU noise is real; do not cite either row as a product SLO. Re-run `./scripts/bench.sh` and replace the table for your machine.
 
 ---
 

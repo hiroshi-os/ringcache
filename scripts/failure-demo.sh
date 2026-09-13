@@ -111,9 +111,9 @@ echo "=== A4. GET node-a and node-c (expect HIT if a surviving owner acked) ==="
 hit=0
 for p in 8080 8082; do
   echo -n "  :$p "
-  body="$(curl -sS --max-time 2 -w '\n%{http_code}' "http://127.0.0.1:$p/v1/get?key=$KEY" || true)"
-  echo "$body"
-  if echo "$body" | grep -q '"found":true'; then
+  body="$(curl -sS --max-time 2 -o /tmp/ringcache-get-a.json -w '%{http_code}' "http://127.0.0.1:$p/v1/get?key=$KEY" || true)"
+  echo "$(cat /tmp/ringcache-get-a.json 2>/dev/null)  HTTP $body"
+  if grep -q '"found":true' /tmp/ringcache-get-a.json 2>/dev/null; then
     hit=1
   fi
 done
@@ -179,9 +179,9 @@ sleep 0.3
 echo
 echo "=== B3. GET via node-c (not an owner; both owners are down) ==="
 echo -n "  :8082 "
-body="$(curl -sS --max-time 2 -w '\n%{http_code}' "http://127.0.0.1:8082/v1/get?key=$KEYB" || true)"
-echo "$body"
-if echo "$body" | grep -q '"found":true'; then
+body="$(curl -sS --max-time 2 -o /tmp/ringcache-get-b.json -w '%{http_code}' "http://127.0.0.1:8082/v1/get?key=$KEYB" || true)"
+echo "$(cat /tmp/ringcache-get-b.json 2>/dev/null)  HTTP $body"
+if grep -q '"found":true' /tmp/ringcache-get-b.json 2>/dev/null; then
   echo "RESULT B: unexpected hit — both owners should be gone" >&2
   exit 1
 fi
