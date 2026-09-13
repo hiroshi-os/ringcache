@@ -11,10 +11,21 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+docker_cmd() {
+  if docker info >/dev/null 2>&1; then
+    docker "$@"
+  elif sudo docker info >/dev/null 2>&1; then
+    sudo docker "$@"
+  else
+    echo "docker is not usable" >&2
+    return 1
+  fi
+}
+
 USE_COMPOSE=0
 if [[ "${1:-}" == "--compose" ]]; then
   USE_COMPOSE=1
-elif command -v docker >/dev/null 2>&1 && docker compose ps --status running 2>/dev/null | grep -q node-a; then
+elif command -v docker >/dev/null 2>&1 && docker_cmd compose ps --status running 2>/dev/null | grep -q node-a; then
   USE_COMPOSE=1
 fi
 
@@ -59,7 +70,7 @@ done
 
 echo "=== 4. kill node-b ==="
 if [[ "$USE_COMPOSE" -eq 1 ]]; then
-  docker compose stop node-b
+  docker_cmd compose stop node-b
 else
   if [[ -f /tmp/ringcache-b.pid ]]; then
     kill "$(cat /tmp/ringcache-b.pid)" || true

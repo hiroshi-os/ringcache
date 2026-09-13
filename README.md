@@ -38,7 +38,7 @@ A client talks to **any** node. That node is the coordinator: it hashes the key,
 docker compose up --build
 ```
 
-Host ports: `node-a :8080`, `node-b :8081`, `node-c :8082`.
+Host ports: `node-a :8080`, `node-b :8081`, `node-c :8082`. Compose uses `network_mode: host` so the three processes can replicate over loopback (a Docker bridge on this nested CI VM drops 100% of veth-to-veth packets). On Docker Desktop (Mac/Windows), use `make cluster` instead.
 
 ### Local processes (no Docker)
 
@@ -184,6 +184,8 @@ Harness: `cmd/bench` — real HTTP PUT `/v1/set` and GET `/v1/get` against all t
 | GET | 4000 | 0 | 129ms | **31027** | 0.82ms | 2.68ms | 3.91ms | 5.84ms | 1.02ms |
 
 These are **this VM, this commit, loopback**. Docker NAT, a laptop, or a noisy neighbor will differ. Do not cite them as product SLOs.
+
+`docker compose up --build` was also run on this VM (host network). SET acked 2/2; after `compose stop node-b` on a key owned by node-b, GET on :8080 and :8082 still hit `node-a`.
 
 ---
 

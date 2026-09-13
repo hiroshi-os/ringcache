@@ -409,6 +409,8 @@ func (n *Node) fanout(ctx context.Context, method string, owners []string, body 
 }
 
 func (n *Node) writeOwner(ctx context.Context, method, id string, body kvBody) error {
+	// Writes always attempt the peer. A startup blip must not hide a replica
+	// behind the read-side breaker for the next two seconds.
 	if id == n.cfg.ID {
 		switch method {
 		case http.MethodPut:
@@ -421,9 +423,6 @@ func (n *Node) writeOwner(ctx context.Context, method, id string, body kvBody) e
 		default:
 			return fmt.Errorf("bad method %s", method)
 		}
-	}
-	if n.isDown(id) {
-		return fmt.Errorf("%s marked down", id)
 	}
 	base := strings.TrimRight(n.cfg.Peers[id], "/")
 	var req *http.Request

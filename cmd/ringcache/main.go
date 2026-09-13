@@ -17,9 +17,16 @@ import (
 )
 
 func main() {
+	healthcheck := flag.Bool("healthcheck", false, "GET /health on the local listen port and exit")
 	cfg, err := parseConfig()
 	if err != nil {
 		log.Fatalf("config: %v", err)
+	}
+	if *healthcheck {
+		if err := runHealthcheck(cfg.Listen); err != nil {
+			log.Fatalf("healthcheck: %v", err)
+		}
+		return
 	}
 	n, err := node.New(cfg)
 	if err != nil {
@@ -121,6 +128,25 @@ func envInt(key string, def int) int {
 		}
 	}
 	return def
+}
+
+func runHealthcheck(listen string) error {
+	port := listen
+	if i := strings.LastIndex(listen, ":"); i >= 0 {
+		port = listen[i:]
+	}
+	if !strings.HasPrefix(port, ":") {
+		port = ":8080"
+	}
+	resp, err := http.Get("http://127.0.0.1" + port + "/health")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func normalizeListen(listen string) string {
