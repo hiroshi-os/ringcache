@@ -48,6 +48,7 @@ type Node struct {
 
 	mu        sync.Mutex
 	downUntil map[string]time.Time
+	peers     map[string]string
 }
 
 // New builds a node. The store janitor starts immediately.
@@ -79,12 +80,14 @@ func New(cfg Config) (*Node, error) {
 	if cfg.Replicas > len(cfg.Peers) {
 		cfg.Replicas = len(cfg.Peers)
 	}
-	r := ring.New(cfg.VNodes)
+	peers := make(map[string]string, len(cfg.Peers))
 	ids := make([]string, 0, len(cfg.Peers))
-	for id := range cfg.Peers {
+	for id, u := range cfg.Peers {
+		peers[id] = u
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
+	r := ring.New(cfg.VNodes)
 	for _, id := range ids {
 		r.Add(id)
 	}
@@ -95,6 +98,7 @@ func New(cfg Config) (*Node, error) {
 		client:    &http.Client{Timeout: cfg.ReplicaTimeout},
 		log:       log.New(log.Writer(), "["+cfg.ID+"] ", log.LstdFlags|log.Lmicroseconds),
 		downUntil: make(map[string]time.Time),
+		peers:     peers,
 	}, nil
 }
 
@@ -116,6 +120,7 @@ func (n *Node) Handler() http.Handler {
 	mux.HandleFunc("/v1/delete", n.handleDelete)
 	mux.HandleFunc("/delete", n.handleDelete)
 	mux.HandleFunc("/internal/kv", n.handleInternalKV)
+	mux.HandleFunc("/admin/members", n.handleMembers)
 	return mux
 }
 
@@ -193,7 +198,7 @@ func (n *Node) handleRing(w http.ResponseWriter, r *http.Request) {
 	resp := ringResp{
 		ID:       n.cfg.ID,
 		Nodes:    n.ring.Nodes(),
-		Peers:    n.cfg.Peers,
+		Peers:    n.snapshotPeers(),
 		VNodes:   n.cfg.VNodes,
 		RingLen:  n.ring.Len(),
 		Replicas: n.cfg.Replicas,
@@ -351,7 +356,11 @@ func (n *Node) readOwner(ctx context.Context, id, key string) (store.Entry, bool
 	if n.isDown(id) {
 		return store.Entry{}, false, fmt.Errorf("%s marked down", id)
 	}
-	url := strings.TrimRight(n.cfg.Peers[id], "/") + "/internal/kv?key=" + urlQuery(key)
+	base := n.peerURL(id)
+	if base == "" {
+		return store.Entry{}, false, fmt.Errorf("unknown peer %s", id)
+	}
+	url := strings.TrimRight(base, "/") + "/internal/kv?key=" + urlQuery(key)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return store.Entry{}, false, err
@@ -424,7 +433,10 @@ func (n *Node) writeOwner(ctx context.Context, method, id string, body kvBody) e
 			return fmt.Errorf("bad method %s", method)
 		}
 	}
-	base := strings.TrimRight(n.cfg.Peers[id], "/")
+	base := strings.TrimRight(n.peerURL(id), "/")
+	if base == "" {
+		return fmt.Errorf("unknown peer %s", id)
+	}
 	var req *http.Request
 	var err error
 	if method == http.MethodDelete {
@@ -464,19 +476,116 @@ func (n *Node) readRepair(key string, ent store.Entry, owners []string, servedBy
 		ttlMs = rem
 	}
 	body := kvBody{Key: key, Value: ent.Value, TTLMs: ttlMs, WrittenAt: ent.WrittenAt}
-	ctx, cancel := context.WithTimeout(context.Background(), n.cfg.ReplicaTimeout)
-	defer cancel()
 	for _, id := range owners {
 		if id == servedBy {
 			continue
 		}
 		id := id
 		go func() {
+			// Per-goroutine timeout: the parent must not cancel when handleGet
+			// returns (the previous shared ctx was canceled immediately).
+			ctx, cancel := context.WithTimeout(context.Background(), n.cfg.ReplicaTimeout)
+			defer cancel()
 			if err := n.writeOwner(ctx, http.MethodPut, id, body); err != nil {
 				n.log.Printf("read-repair %q → %s: %v", key, id, err)
 			}
 		}()
 	}
+}
+
+func (n *Node) handleMembers(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{
+			"id":    n.cfg.ID,
+			"nodes": n.ring.Nodes(),
+			"peers": n.snapshotPeers(),
+		})
+	case http.MethodPut, http.MethodPost:
+		var body struct {
+			ID  string `json:"id"`
+			URL string `json:"url"`
+		}
+		if err := readJSON(r, &body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := n.join(body.ID, body.URL); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":    true,
+			"id":    n.cfg.ID,
+			"nodes": n.ring.Nodes(),
+			"peers": n.snapshotPeers(),
+		})
+	case http.MethodDelete:
+		id := r.URL.Query().Get("id")
+		if err := n.leave(id); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":    true,
+			"id":    n.cfg.ID,
+			"nodes": n.ring.Nodes(),
+			"peers": n.snapshotPeers(),
+		})
+	default:
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+	}
+}
+
+// join adds a physical node to this process's ring and peer map.
+// Membership is not gossip: every live node must be told (see scripts/rebalance-demo.sh).
+func (n *Node) join(id, rawURL string) error {
+	id = strings.TrimSpace(id)
+	rawURL = strings.TrimSpace(rawURL)
+	if id == "" || rawURL == "" {
+		return errors.New("id and url required")
+	}
+	if _, err := url.ParseRequestURI(rawURL); err != nil {
+		return fmt.Errorf("url: %w", err)
+	}
+	n.mu.Lock()
+	n.peers[id] = rawURL
+	n.mu.Unlock()
+	n.ring.Add(id)
+	return nil
+}
+
+// leave removes a physical node from this process's ring. Self cannot leave.
+func (n *Node) leave(id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("id required")
+	}
+	if id == n.cfg.ID {
+		return errors.New("cannot remove self")
+	}
+	n.mu.Lock()
+	delete(n.peers, id)
+	delete(n.downUntil, id)
+	n.mu.Unlock()
+	n.ring.Remove(id)
+	return nil
+}
+
+func (n *Node) snapshotPeers() map[string]string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	out := make(map[string]string, len(n.peers))
+	for k, v := range n.peers {
+		out[k] = v
+	}
+	return out
+}
+
+func (n *Node) peerURL(id string) string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.peers[id]
 }
 
 func (n *Node) markDown(id string) {

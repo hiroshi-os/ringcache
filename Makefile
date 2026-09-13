@@ -1,4 +1,4 @@
-.PHONY: build test race bench cluster stop demo fmt
+.PHONY: build test race bench cluster stop demo rebalance quickstart fmt ci
 
 build:
 	mkdir -p bin
@@ -23,5 +23,16 @@ stop:
 bench: build
 	./scripts/bench.sh
 
+quickstart:
+	./scripts/quickstart.sh
+
 demo: build
 	./scripts/failure-demo.sh
+
+rebalance: build
+	./scripts/rebalance-demo.sh
+
+ci:
+	test -z "$$(gofmt -l cmd internal)"
+	go vet ./...
+	go test ./... -race -count=1

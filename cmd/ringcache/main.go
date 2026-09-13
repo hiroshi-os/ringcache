@@ -38,6 +38,9 @@ func main() {
 		Addr:              cfg.Listen,
 		Handler:           n.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
@@ -138,7 +141,8 @@ func runHealthcheck(listen string) error {
 	if !strings.HasPrefix(port, ":") {
 		port = ":8080"
 	}
-	resp, err := http.Get("http://127.0.0.1" + port + "/health")
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("http://127.0.0.1" + port + "/health")
 	if err != nil {
 		return err
 	}
