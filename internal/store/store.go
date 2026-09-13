@@ -44,19 +44,20 @@ type Stats struct {
 
 // Store is a mutex-protected LRU+TTL map.
 type Store struct {
-	mu       sync.Mutex
-	capacity int
-	ll       *list.List // front = most recently used
-	items    map[string]*list.Element
-	hits     uint64
-	misses   uint64
-	sets     uint64
-	deletes  uint64
-	evicts   uint64
-	expired  uint64
-	skipped  uint64
-	stop     chan struct{}
-	stopped  chan struct{}
+	mu        sync.Mutex
+	capacity  int
+	ll        *list.List // front = most recently used
+	items     map[string]*list.Element
+	hits      uint64
+	misses    uint64
+	sets      uint64
+	deletes   uint64
+	evicts    uint64
+	expired   uint64
+	skipped   uint64
+	stop      chan struct{}
+	stopped   chan struct{}
+	closeOnce sync.Once
 }
 
 // New creates a store. capacity < 1 means 1.
@@ -75,15 +76,12 @@ func New(capacity int) *Store {
 	return s
 }
 
-// Close stops the janitor. Safe to call once.
+// Close stops the janitor. Safe to call more than once.
 func (s *Store) Close() {
-	select {
-	case <-s.stop:
-		return
-	default:
+	s.closeOnce.Do(func() {
 		close(s.stop)
-	}
-	<-s.stopped
+		<-s.stopped
+	})
 }
 
 // Get returns (entry, true) on a live hit. Expired keys are deleted and miss.

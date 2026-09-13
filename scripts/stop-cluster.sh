@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -u
-for n in a b c; do
+for n in a b c d; do
   f="/tmp/ringcache-${n}.pid"
   if [[ -f "$f" ]]; then
     pid="$(cat "$f")"

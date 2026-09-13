@@ -126,6 +126,27 @@ func TestJoinRemapsAboutOneNth(t *testing.T) {
 	}
 }
 
+func TestLeaveRemapsAboutOneNth(t *testing.T) {
+	r := testRing(t, 150, "a", "b", "c", "d")
+	const n = 5000
+	before := make([]string, n)
+	for i := 0; i < n; i++ {
+		before[i] = r.Primary("k:" + strconv.Itoa(i))
+	}
+	r.Remove("d")
+	changed := 0
+	for i := 0; i < n; i++ {
+		if r.Primary("k:"+strconv.Itoa(i)) != before[i] {
+			changed++
+		}
+	}
+	frac := float64(changed) / float64(n)
+	// 4 → 3: keys whose primary was d (~1/4) should move.
+	if frac < 0.12 || frac > 0.40 {
+		t.Fatalf("leave remap fraction %.3f outside [0.12, 0.40] (changed=%d)", frac, changed)
+	}
+}
+
 func TestReplicaSetStableAfterUnrelatedJoin(t *testing.T) {
 	r := testRing(t, 150, "a", "b")
 	owners := r.Owners("sticky-key", 2)

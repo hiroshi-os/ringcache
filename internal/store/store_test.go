@@ -155,6 +155,12 @@ func TestHitsAndMisses(t *testing.T) {
 	}
 }
 
+func TestCloseIdempotent(t *testing.T) {
+	s := New(2)
+	s.Close()
+	s.Close()
+}
+
 func TestConcurrentSetGet(t *testing.T) {
 	s := New(256)
 	defer s.Close()
