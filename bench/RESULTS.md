@@ -24,7 +24,8 @@ bin/ratebench.exe -target 100 -burst 20 -mult 2 -duration 30s -kill-after 10s -t
 ```
 
 Harness: async offer (128 workers) through `pkg/ratelimit` middleware against a live cluster.
-Commit at measurement time: recorded in the table (working tree may have advanced for docs).
+Measurement commit (ratebench binary): `69ea7bbbcc5b687c934bc7b783beeb697692e66b` (feat/ratelimit).
+Working tree at first push of the feature also included `d7626ad` (endpoint + middleware).
 
 ---
 
