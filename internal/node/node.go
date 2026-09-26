@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hiroshi-os/ringcache/internal/ratelimit"
 	"github.com/hiroshi-os/ringcache/internal/ring"
 	"github.com/hiroshi-os/ringcache/internal/store"
 )
@@ -36,6 +37,10 @@ type Config struct {
 	VNodes         int
 	ReplicaTimeout time.Duration
 	BreakFor       time.Duration
+	// RateLimitCapacity is max idle token buckets on this node (default 10000).
+	RateLimitCapacity int
+	// RateLimitIdleTTL drops unused buckets (default 60s).
+	RateLimitIdleTTL time.Duration
 }
 
 // Node is a cache member.
@@ -43,6 +48,7 @@ type Node struct {
 	cfg    Config
 	ring   *ring.Ring
 	store  *store.Store
+	rl     *ratelimit.Store
 	client *http.Client
 	log    *log.Logger
 
@@ -74,6 +80,12 @@ func New(cfg Config) (*Node, error) {
 	if cfg.BreakFor <= 0 {
 		cfg.BreakFor = 2 * time.Second
 	}
+	if cfg.RateLimitCapacity < 1 {
+		cfg.RateLimitCapacity = 10000
+	}
+	if cfg.RateLimitIdleTTL <= 0 {
+		cfg.RateLimitIdleTTL = 60 * time.Second
+	}
 	if _, ok := cfg.Peers[cfg.ID]; !ok {
 		return nil, fmt.Errorf("peers must include self %q", cfg.ID)
 	}
@@ -95,6 +107,7 @@ func New(cfg Config) (*Node, error) {
 		cfg:       cfg,
 		ring:      r,
 		store:     store.New(cfg.Capacity),
+		rl:        ratelimit.NewStore(cfg.RateLimitCapacity, cfg.RateLimitIdleTTL, ratelimit.RealClock{}),
 		client:    &http.Client{Timeout: cfg.ReplicaTimeout},
 		log:       log.New(log.Writer(), "["+cfg.ID+"] ", log.LstdFlags|log.Lmicroseconds),
 		downUntil: make(map[string]time.Time),
@@ -105,6 +118,7 @@ func New(cfg Config) (*Node, error) {
 // Close stops the local store janitor.
 func (n *Node) Close() {
 	n.store.Close()
+	n.rl.Close()
 }
 
 // Handler returns the HTTP mux.
@@ -120,8 +134,25 @@ func (n *Node) Handler() http.Handler {
 	mux.HandleFunc("/v1/delete", n.handleDelete)
 	mux.HandleFunc("/delete", n.handleDelete)
 	mux.HandleFunc("/internal/kv", n.handleInternalKV)
+	mux.HandleFunc("/v1/ratelimit/take", n.handleRateLimitTake)
+	mux.HandleFunc("/internal/ratelimit/take", n.handleInternalRateLimitTake)
 	mux.HandleFunc("/admin/members", n.handleMembers)
 	return mux
+}
+
+type rateLimitBody struct {
+	Key   string  `json:"key"`
+	Rate  float64 `json:"rate"`  // tokens per second
+	Burst float64 `json:"burst"` // max tokens
+	Cost  float64 `json:"cost"`  // tokens to consume (default 1)
+}
+
+type rateLimitResp struct {
+	Allowed      bool    `json:"allowed"`
+	Remaining    float64 `json:"remaining"`
+	RetryAfterMs int64   `json:"retry_after_ms"`
+	Primary      string  `json:"primary,omitempty"`
+	ServedBy     string  `json:"served_by,omitempty"`
 }
 
 type kvBody struct {
@@ -148,11 +179,12 @@ type writeResp struct {
 }
 
 type statsResp struct {
-	ID       string      `json:"id"`
-	Listen   string      `json:"listen"`
-	Replicas int         `json:"replicas"`
-	VNodes   int         `json:"vnodes_per_node"`
-	Store    store.Stats `json:"store"`
+	ID               string      `json:"id"`
+	Listen           string      `json:"listen"`
+	Replicas         int         `json:"replicas"`
+	VNodes           int         `json:"vnodes_per_node"`
+	Store            store.Stats `json:"store"`
+	RateLimitBuckets int         `json:"ratelimit_buckets"`
 }
 
 type ringResp struct {
@@ -182,11 +214,12 @@ func (n *Node) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, statsResp{
-		ID:       n.cfg.ID,
-		Listen:   n.cfg.Listen,
-		Replicas: n.cfg.Replicas,
-		VNodes:   n.cfg.VNodes,
-		Store:    n.store.Stats(),
+		ID:               n.cfg.ID,
+		Listen:           n.cfg.Listen,
+		Replicas:         n.cfg.Replicas,
+		VNodes:           n.cfg.VNodes,
+		Store:            n.store.Stats(),
+		RateLimitBuckets: n.rl.Len(),
 	})
 }
 
@@ -491,6 +524,112 @@ func (n *Node) readRepair(key string, ent store.Entry, owners []string, servedBy
 			}
 		}()
 	}
+}
+
+func (n *Node) handleRateLimitTake(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodPut {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := parseRateLimitBody(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	primary := n.ring.Primary(body.Key)
+	if primary == "" {
+		http.Error(w, "empty ring", http.StatusServiceUnavailable)
+		return
+	}
+	if primary == n.cfg.ID {
+		res := n.rl.Take(body.Key, body.Rate, body.Burst, body.Cost)
+		writeJSON(w, http.StatusOK, rateLimitResp{
+			Allowed:      res.Allowed,
+			Remaining:    res.Remaining,
+			RetryAfterMs: res.RetryAfterMs,
+			Primary:      primary,
+			ServedBy:     n.cfg.ID,
+		})
+		return
+	}
+	// Forward to the PRIMARY only — rate-limit state is not replicated.
+	out, status, err := n.forwardRateLimit(r.Context(), primary, body)
+	if err != nil {
+		n.markDown(primary)
+		n.log.Printf("ratelimit forward %q → %s: %v", body.Key, primary, err)
+		http.Error(w, "primary unreachable", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(out)
+}
+
+func (n *Node) handleInternalRateLimitTake(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodPut {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := parseRateLimitBody(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// Internal path always applies locally (caller already chose the primary).
+	res := n.rl.Take(body.Key, body.Rate, body.Burst, body.Cost)
+	writeJSON(w, http.StatusOK, rateLimitResp{
+		Allowed:      res.Allowed,
+		Remaining:    res.Remaining,
+		RetryAfterMs: res.RetryAfterMs,
+		Primary:      n.cfg.ID,
+		ServedBy:     n.cfg.ID,
+	})
+}
+
+func parseRateLimitBody(r *http.Request) (rateLimitBody, error) {
+	var body rateLimitBody
+	if err := readJSON(r, &body); err != nil {
+		return body, err
+	}
+	if err := validateKey(body.Key); err != nil {
+		return body, err
+	}
+	if body.Rate < 0 || body.Burst < 0 {
+		return body, errors.New("rate and burst must be >= 0")
+	}
+	if body.Cost == 0 {
+		body.Cost = 1
+	}
+	if body.Cost < 0 {
+		return body, errors.New("cost must be >= 0")
+	}
+	return body, nil
+}
+
+func (n *Node) forwardRateLimit(ctx context.Context, id string, body rateLimitBody) ([]byte, int, error) {
+	base := strings.TrimRight(n.peerURL(id), "/")
+	if base == "" {
+		return nil, 0, fmt.Errorf("unknown peer %s", id)
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, 0, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/internal/ratelimit/take", bytes.NewReader(raw))
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := n.client.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer res.Body.Close()
+	out, err := io.ReadAll(io.LimitReader(res.Body, 4096))
+	if err != nil {
+		return nil, 0, err
+	}
+	return out, res.StatusCode, nil
 }
 
 func (n *Node) handleMembers(w http.ResponseWriter, r *http.Request) {

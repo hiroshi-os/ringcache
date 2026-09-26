@@ -231,10 +231,11 @@ make ci
 
 - `internal/ring` — deterministic owners, unique replicas, vnode count, key spread, join/leave remap ~1/N
 - `internal/store` — LRU order, TTL expiry, LWW stale-write ignore, capacity-1 eviction
-- `internal/node` — 3-node `httptest` SET/GET/DELETE, partial ACK when an owner is down, join/leave
+- `internal/node` — 3-node `httptest` SET/GET/DELETE, partial ACK when an owner is down, join/leave, rate-limit primary forward
+- `internal/ratelimit` — bucket math with fake clock (refill, burst, cost>burst, retry_after)
+- `pkg/ratelimit` — 429+Retry-After, fail-open counter, kill switch, concurrent limiter
 
-CI (GitHub Actions) runs `gofmt`, `go vet`, `-race` tests, then `failure-demo.sh` and `rebalance-demo.sh` against `make cluster`.
-
+CI (GitHub Actions) runs `gofmt`, `go vet`, `-race` tests, failure/rebalance demos, and a short `ratebench` (3s).
 ---
 
 ## Config
@@ -260,6 +261,75 @@ CI (GitHub Actions) runs `gofmt`, `go vet`, `-race` tests, then `failure-demo.sh
 - No cross-key transactions, scans, or CAS (beyond LWW timestamps).
 - Single-threaded-looking correctness under a mutex per store; the hot path is still local RAM + HTTP.
 - Zero LLM / AI wrappers. The binary is `net/http` + maps.
+- **Rate limiting is approximate.** Bucket state is primary-only (not replicated). On failover the new primary starts empty, so counts reset and the limit can briefly be exceeded. Failing open means the limit is **not** enforced while ringcache is down or slow. The concurrent-request limiter is **per-instance only**.
+
+---
+
+## Token-bucket rate limiting
+
+Soft quotas, not a financial control plane.
+
+### Server API
+
+`POST /v1/ratelimit/take` with body `{key, rate, burst, cost}`:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/v1/ratelimit/take \
+  -H 'Content-Type: application/json' \
+  -d '{"key":"alice","rate":10,"burst":20,"cost":1}'
+# {"allowed":true,"remaining":19,"retry_after_ms":0,"primary":"node-b","served_by":"node-b"}
+```
+
+- State lives on the key's **PRIMARY** owner only — **no replication**.
+- Non-owner coordinators forward to `/internal/ratelimit/take` on the primary.
+- Lazy refill on each take (tokens += elapsed×rate, capped at burst). Idle buckets are TTL-evicted.
+- Approximate by design: during failover counts reset and the limit can briefly be exceeded.
+
+### Middleware (`pkg/ratelimit`)
+
+```go
+cli := &ratelimit.Client{
+    Addrs:   []string{"http://127.0.0.1:8080", "http://127.0.0.1:8081", "http://127.0.0.1:8082"},
+    Timeout: 5 * time.Millisecond, // fail-open budget
+}
+mw := ratelimit.Middleware(ratelimit.Config{
+    Client: cli, Rate: 100, Burst: 20,
+    MaxInFlight: 64, // per-instance semaphore
+})
+http.ListenAndServe(":9090", mw(yourHandler))
+```
+
+- Rejected requests get **429** with `Retry-After` (seconds, rounded up).
+- **FAIL OPEN:** if ringcache is unreachable, errors, or misses `Timeout` (default 5ms), the request is allowed and `ratelimit_fail_open_total` (expvar) increments.
+- `RATELIMIT_DISABLED=1` bypasses everything. `DryRun: true` logs would-be 429s but allows.
+
+### Demo
+
+```bash
+make cluster
+go run ./examples/ratelimit-demo -listen 127.0.0.1:9090 -rate 5 -burst 5
+# or: bash examples/ratelimit-demo/run.sh
+curl -H 'X-API-Key: alice' http://127.0.0.1:9090/api/hello
+```
+
+### Accuracy bench
+
+```bash
+./scripts/ratebench.sh          # 60s @ 2x and 5x target (default 100/s, burst 20)
+DURATION=3s ./scripts/ratebench.sh   # short CI-style run
+```
+
+Measured numbers (this laptop) live in [`bench/RESULTS.md`](bench/RESULTS.md) and the table below — hardware, date, commit SHA, and exact command are recorded there. Re-run before citing.
+
+| Scenario | allow rate vs target | middleware p50 | middleware p99 |
+| --- | --- | --- | --- |
+| 2× offer (200/s → target 100/s) | **-0.07%** (99.93/s) | 1.57ms | 7.05ms |
+| 5× offer (500/s) | **+262%** (fail-open under overload) | 160ms | 1.34s |
+| baseline (no limiter) p99 | — | — | 0.60ms |
+| p99 added (2× − baseline) | — | — | **~6.45ms** |
+| primary kill fail-open window | — | — | **311ms** detect; then fail-open |
+
+Full hardware / commit / commands: [`bench/RESULTS.md`](bench/RESULTS.md).
 
 ---
 
@@ -269,3 +339,4 @@ CI (GitHub Actions) runs `gofmt`, `go vet`, `-race` tests, then `failure-demo.sh
 
 - **DRAFT.** Built a 3-node Go in-memory cache with consistent hashing (`V` virtual nodes, FNV-1a), per-node LRU+TTL, and `R=2` synchronous fan-out; coordinators report `acked`/`failed` and treat success as `acked≥1` (not linearizable, not a quorum, no persistence).
 - **DRAFT.** Measured real HTTP SET/GET throughput and p99 on a 3-node loopback cluster and documented single-replica-kill vs partial-ACK-then-kill: reads continue only when a surviving replica acked the write (last-writer-wins).
+- **DRAFT.** Added primary-only token-bucket rate limiting with fail-open middleware (`Retry-After` on 429; expvar `ratelimit_fail_open_total`) and measured allow-rate error % at 2×/5× offer plus p99 added latency (see `bench/RESULTS.md`).
