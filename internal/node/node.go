@@ -179,12 +179,12 @@ type writeResp struct {
 }
 
 type statsResp struct {
-	ID                string      `json:"id"`
-	Listen            string      `json:"listen"`
-	Replicas          int         `json:"replicas"`
-	VNodes            int         `json:"vnodes_per_node"`
-	Store             store.Stats `json:"store"`
-	RateLimitBuckets  int         `json:"ratelimit_buckets"`
+	ID               string      `json:"id"`
+	Listen           string      `json:"listen"`
+	Replicas         int         `json:"replicas"`
+	VNodes           int         `json:"vnodes_per_node"`
+	Store            store.Stats `json:"store"`
+	RateLimitBuckets int         `json:"ratelimit_buckets"`
 }
 
 type ringResp struct {

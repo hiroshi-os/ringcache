@@ -41,6 +41,33 @@ type Client struct {
 	Addrs   []string
 	Timeout time.Duration
 	HTTP    *http.Client
+
+	once   sync.Once
+	shared *http.Client
+}
+
+func (c *Client) httpClient() *http.Client {
+	if c.HTTP != nil {
+		return c.HTTP
+	}
+	c.once.Do(func() {
+		timeout := c.Timeout
+		if timeout <= 0 {
+			timeout = 5 * time.Millisecond
+		}
+		c.shared = &http.Client{
+			Timeout: timeout,
+			Transport: &http.Transport{
+				Proxy:                 http.ProxyFromEnvironment,
+				MaxIdleConns:          128,
+				MaxIdleConnsPerHost:   32,
+				IdleConnTimeout:       90 * time.Second,
+				ResponseHeaderTimeout: timeout,
+				ForceAttemptHTTP2:     false,
+			},
+		}
+	})
+	return c.shared
 }
 
 // Take asks any coordinator; that node forwards to the key's PRIMARY.
@@ -52,15 +79,12 @@ func (c *Client) Take(ctx context.Context, key string, rate, burst, cost float64
 	if timeout <= 0 {
 		timeout = 5 * time.Millisecond
 	}
-	httpClient := c.HTTP
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: timeout}
-	}
+	httpClient := c.httpClient()
 	body, _ := json.Marshal(map[string]any{
 		"key": key, "rate": rate, "burst": burst, "cost": cost,
 	})
 	var lastErr error
-	for i, addr := range c.Addrs {
+	for _, addr := range c.Addrs {
 		base := strings.TrimRight(addr, "/")
 		reqCtx, cancel := context.WithTimeout(ctx, timeout)
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, base+"/v1/ratelimit/take", bytes.NewReader(body))
@@ -74,8 +98,6 @@ func (c *Client) Take(ctx context.Context, key string, rate, burst, cost float64
 		cancel()
 		if err != nil {
 			lastErr = err
-			// try next addr
-			_ = i
 			continue
 		}
 		raw, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
@@ -188,7 +210,10 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 			d, err := cfg.Client.Take(r.Context(), key, cfg.Rate, cfg.Burst, cfg.Cost)
 			if err != nil {
 				FailOpenTotal.Add(1)
-				cfg.Logger.Printf("ratelimit fail-open key=%s: %v", key, err)
+				// Avoid flooding logs under load / port exhaustion.
+				if FailOpenTotal.Value() <= 5 || FailOpenTotal.Value()%1000 == 0 {
+					cfg.Logger.Printf("ratelimit fail-open key=%s (count=%d): %v", key, FailOpenTotal.Value(), err)
+				}
 				next.ServeHTTP(w, r)
 				return
 			}

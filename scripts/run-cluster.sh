@@ -4,8 +4,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 mkdir -p bin
-if [[ ! -x bin/ringcache ]]; then
+BIN=bin/ringcache
+if [[ ! -x "$BIN" && ! -x "${BIN}.exe" ]]; then
   go build -o bin/ringcache ./cmd/ringcache
+fi
+if [[ -x "${BIN}.exe" && ! -x "$BIN" ]]; then
+  BIN="${BIN}.exe"
 fi
 
 ./scripts/stop-cluster.sh 2>/dev/null || true
@@ -19,11 +23,11 @@ common=(
   -peers "$PEERS"
 )
 
-./bin/ringcache -id node-a -listen 127.0.0.1:8080 "${common[@]}" > /tmp/ringcache-a.log 2>&1 &
+"$BIN" -id node-a -listen 127.0.0.1:8080 "${common[@]}" > /tmp/ringcache-a.log 2>&1 &
 echo $! > /tmp/ringcache-a.pid
-./bin/ringcache -id node-b -listen 127.0.0.1:8081 "${common[@]}" > /tmp/ringcache-b.log 2>&1 &
+"$BIN" -id node-b -listen 127.0.0.1:8081 "${common[@]}" > /tmp/ringcache-b.log 2>&1 &
 echo $! > /tmp/ringcache-b.pid
-./bin/ringcache -id node-c -listen 127.0.0.1:8082 "${common[@]}" > /tmp/ringcache-c.log 2>&1 &
+"$BIN" -id node-c -listen 127.0.0.1:8082 "${common[@]}" > /tmp/ringcache-c.log 2>&1 &
 echo $! > /tmp/ringcache-c.pid
 
 ok=0

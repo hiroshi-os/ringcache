@@ -14,7 +14,7 @@ jobs:
         with:
           go-version: "1.22"
       - name: format
-        run: test -z "$(gofmt -l cmd internal)"
+        run: test -z "$(gofmt -l cmd internal pkg examples)"
       - name: vet
         run: go vet ./...
       - name: test
@@ -24,4 +24,9 @@ jobs:
           ./scripts/run-cluster.sh
           ./scripts/failure-demo.sh
           ./scripts/rebalance-demo.sh
+      - name: short ratebench
+        run: |
+          go build -o bin/ratebench ./cmd/ratebench
+          ./bin/ratebench -target 100 -burst 20 -mult 2 -duration 3s -timeout 50ms
+          ./bin/ratebench -target 100 -burst 20 -mult 5 -duration 3s -timeout 50ms
           ./scripts/stop-cluster.sh

@@ -2,4 +2,6 @@
 /tmp/
 *.log
 *.pid
+*.exe
 .DS_Store
+bench/ratebench-raw.txt

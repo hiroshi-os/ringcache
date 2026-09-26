@@ -12,5 +12,6 @@ for n in a b c d; do
   fi
 done
 # Fallback if started outside the pid files.
-pkill -f '/bin/ringcache' 2>/dev/null || true
+pkill -f 'ringcache' 2>/dev/null || true
+pkill -f 'ratelimit-demo' 2>/dev/null || true
 echo "cluster stopped"
